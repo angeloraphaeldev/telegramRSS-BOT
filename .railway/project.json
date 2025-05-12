@@ -1,0 +1,14 @@
+{
+  "name": "telegram-rss-bot",
+  "services": [
+    {
+      "name": "bot",
+      "startCommand": "python main.py",
+      "envs": {
+        "TG_TOKEN": {
+          "fromEnv": "tg_TOKEN"
+        }
+      }
+    }
+  ]
+}
