@@ -1,135 +1,117 @@
-from telegram import Update, InputFile
+import os
+import json
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
-import os
+from urllib.parse import urlparse
 
 load_dotenv()
+
 tg_TOKEN = os.getenv("tg_TOKEN")
+FEEDS_FILE = "feeds.json"
+OPML_FILE = "feeds.opml"
 
 if not tg_TOKEN:
-    raise ValueError("Token do Telegram não encontrado. Verifique a variável tg_TOKEN no .env.")
+    raise ValueError("Token do Telegram não encontrado. Verifique a variável tg_TOKEN.")
 
-CAMINHO_ARQUIVO = "canais.txt"
-ARQUIVO_OPML = "rssfeeds.opml"
+def load_feeds():
+    if os.path.exists(FEEDS_FILE):
+        with open(FEEDS_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_feeds(feeds):
+    with open(FEEDS_FILE, "w") as f:
+        json.dump(feeds, f, indent=2)
+
+def add_feed(title, url, site_url):
+    feeds = load_feeds()
+    if any(feed["xmlUrl"] == url for feed in feeds):
+        return False
+    feeds.append({"title": title, "xmlUrl": url, "htmlUrl": site_url})
+    save_feeds(feeds)
+    return True
+
+def export_to_opml():
+    feeds = load_feeds()
+    outline_items = "".join(
+        f'<outline type="rss" text="{f["title"]}" title="{f["title"]}" xmlUrl="{f["xmlUrl"]}" htmlUrl="{f["htmlUrl"]}" />\n'
+        for f in feeds
+    )
+    opml = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<opml version=\"1.0\">
+  <head>
+    <title>Meus Feeds</title>
+  </head>
+  <body>
+    {outline_items}  </body>
+</opml>
+"""
+    with open(OPML_FILE, "w") as f:
+        f.write(opml)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Envie o nome do canal público (sem @) e eu te darei o link RSS.\nDigite /help para mais opções."
-    )
+    await update.message.reply_text("Envie um nome de canal público (Telegram, Threads, YouTube) para gerar o link RSS. Use /help para mais informações.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📌 Comandos disponíveis:\n"
-        "/start - Início\n"
-        "/help - Ajuda\n"
-        "/canais - Lista de canais salvos\n"
-        "/exportar - Exporta os feeds em OPML\n"
-        "/youtube <id/url> - RSS de canal YouTube\n"
-        "/thread <username> - RSS de perfil Threads\n"
-        "/newsletter <url> - RSS de newsletter Substack\n"
-        "\n📨 Ou envie só o nome de um canal do Telegram."
-    )
+    await update.message.reply_text("""
+Comandos disponíveis:
+/start - Inicia o bot
+/help - Mostra esta mensagem
+/list - Lista todos os feeds salvos
+/export - Exporta os feeds para OPML compatível com Feedly
+""")
 
-async def listar_canais(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not os.path.exists(CAMINHO_ARQUIVO):
-        await update.message.reply_text("Nenhum canal registrado ainda.")
-        return
-
-    with open(CAMINHO_ARQUIVO, "r", encoding="utf-8") as f:
-        canais = sorted(set(l.strip() for l in f if l.strip()))
-
-    if canais:
-        lista_formatada = '\n'.join(f"• {c}" for c in canais)
-        await update.message.reply_text(f"📋 Canais registrados:\n\n{lista_formatada}")
+async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    feeds = load_feeds()
+    if not feeds:
+        await update.message.reply_text("Nenhum feed salvo ainda.")
     else:
-        await update.message.reply_text("Nenhum canal registrado ainda.")
+        resposta = "Feeds salvos:\n" + "\n".join(f"- {f['title']}: {f['xmlUrl']}" for f in feeds)
+        await update.message.reply_text(resposta)
+
+async def export_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    export_to_opml()
+    await update.message.reply_document(document=open(OPML_FILE, "rb"), filename=OPML_FILE)
 
 async def gerar_rss(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    canal = update.message.text.strip().replace('@', '')
+    texto = update.message.text.strip()
 
-    if not canal.isalnum():
-        await update.message.reply_text("❌ Nome de canal inválido. Envie apenas letras e números.")
-        return
+    if texto.startswith("https://www.youtube.com/@"):
+        username = texto.split("@")[-1]
+        url = f"https://rsshub.app/youtube/user/{username}"
+        title = f"YouTube: @{username}"
+        site = f"https://www.youtube.com/@{username}"
 
-    rss_link = f'https://rsshub.app/telegram/channel/{canal}'
-    await update.message.reply_text(f'🔗 Link RSS do canal Telegram:\n{rss_link}')
+    elif "threads.net" in texto:
+        username = texto.split("/")[-1].strip()
+        url = f"https://rsshub.app/threads/{username}"
+        title = f"Threads: {username}"
+        site = f"https://www.threads.net/{username}"
 
-    with open(CAMINHO_ARQUIVO, "a", encoding="utf-8") as f:
-        f.write(f"{canal}\n")
+    else:
+        canal = texto.replace("@", "")
+        url = f"https://rsshub.app/telegram/channel/{canal}"
+        title = f"Telegram: {canal}"
+        site = f"https://t.me/{canal}"
 
-async def exportar_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not os.path.exists(CAMINHO_ARQUIVO):
-        await update.message.reply_text("Nenhum canal para exportar.")
-        return
+    added = add_feed(title, url, site)
+    msg = f"RSS gerado: {url}\n(Esse link pode ser usado no Feedly, Inoreader, etc.)"
+    if not added:
+        msg += "\n⚠️ Este feed já foi adicionado."
 
-    with open(CAMINHO_ARQUIVO, "r", encoding="utf-8") as f:
-        canais = sorted(set(l.strip() for l in f if l.strip()))
-
-    if not canais:
-        await update.message.reply_text("Nenhum canal para exportar.")
-        return
-
-    with open(ARQUIVO_OPML, "w", encoding="utf-8") as f:
-        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-        f.write('<opml version="2.0">\n')
-        f.write('  <head>\n')
-        f.write('    <title>Telegram RSS Feeds</title>\n')
-        f.write('  </head>\n')
-        f.write('  <body>\n')
-
-        for canal in canais:
-            link = f"https://rsshub.app/telegram/channel/{canal}"
-            f.write(f'    <outline text="{canal}" title="{canal}" type="rss" xmlUrl="{link}" />\n')
-
-        f.write('  </body>\n')
-        f.write('</opml>\n')
-
-    await update.message.reply_text("🗂️ Exportando feeds em formato OPML...")
-    await update.message.reply_document(InputFile(ARQUIVO_OPML, filename=ARQUIVO_OPML))
-
-async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Use: /youtube <canal_id ou url>")
-        return
-
-    entrada = context.args[0].strip()
-    canal_id = entrada.split("/")[-1]  # suporta link completo
-    link = f"https://rsshub.app/youtube/channel/{canal_id}"
-    await update.message.reply_text(f"▶️ RSS do YouTube:\n{link}")
-
-async def thread_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Use: /thread <username>")
-        return
-
-    username = context.args[0].replace('@', '')
-    link = f"https://rsshub.app/threads/profile/{username}"
-    await update.message.reply_text(f"🧵 RSS do Threads:\n{link}")
-
-async def newsletter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Use: /newsletter <url>")
-        return
-
-    url = context.args[0]
-    link = f"https://rsshub.app/substack/{url.replace('https://', '').replace('http://', '').split('.')[0]}"
-    await update.message.reply_text(f"📰 RSS da newsletter:\n{link}")
-
+    await update.message.reply_text(msg)
 
 def main():
     app = Application.builder().token(tg_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("canais", listar_canais))
-    app.add_handler(CommandHandler("exportar", exportar_opml))
-
-    app.add_handler(CommandHandler("youtube", youtube_command))
-    app.add_handler(CommandHandler("thread", thread_command))
-    app.add_handler(CommandHandler("newsletter", newsletter_command))
-
+    app.add_handler(CommandHandler("list", list_feeds))
+    app.add_handler(CommandHandler("export", export_feeds))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gerar_rss))
 
+    print("Bot iniciado.")
     app.run_polling()
 
 if __name__ == "__main__":
